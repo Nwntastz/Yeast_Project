@@ -1,7 +1,7 @@
 import numpy as np
 import re
 import concurrent.futures
-from Scripts.pwm_functions import TF_profile
+from Scripts.pwm_functions import gene_profile
 import os
 
 ### TF PWM dictionary set-up ###
@@ -35,7 +35,7 @@ with open(os.getcwd()+"\\Data\\target_motifs.txt","r") as f:
 ### Setting up a dictionary containing the selected upstream intervals for each gene ###
 
 sequences=dict()
-with open(os.getcwd()+"\\Data\\sequences.fa","r") as f:
+with open(os.getcwd()+"\\Data\\sequences1.fa","r") as f: #sequences1.fa contains sequences of length 500 + max{len(PWM)}
     
     for line in f:
 
@@ -58,7 +58,7 @@ total_profile=np.empty(len(motifs), dtype=object)
 #Set up a pool executor for concurrent execution
 with concurrent.futures.ProcessPoolExecutor() as executor:
     #Create all processes
-    control={executor.submit(TF_profile, pwm, sequences):index for index, pwm in enumerate(motifs.values())}
+    control={executor.submit(gene_profile, pwm, sequences):index for index, pwm in enumerate(motifs.values())}
 
     #Save the processes as completed // Retain the original index/TF identity
     counter=0
@@ -68,3 +68,5 @@ with concurrent.futures.ProcessPoolExecutor() as executor:
         total_profile[idx]=process.result()
         print(f"Finished {counter/len(motifs)*100:.2f} % of PWMs")
 
+with open(r"C:\Users\nwnta\Documents\TF_binding.npy","rb") as f:
+    result=np.load(f, allow_pickle=True)

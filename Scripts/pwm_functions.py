@@ -60,3 +60,36 @@ def TF_profile( TF: np.ndarray, genes: Dict[str,str]) -> np.ndarray:
     
     return TF_profile[1:,:]
 
+
+def gene_profile( gene: str, TFs: Dict[str,np.ndarray] ) -> np.ndarray:
+
+    '''
+    This function accepts a gene as input along with all target TF binding motifs.
+    It scores the provided PWM across the totality of the target region of each gene,
+    and returns a matrix of dimensions N_TFs X N_intervals, where N_intervals is the total number 
+    of subsequences scored based on PWM length.
+
+    Note: As some target sequences may differ in length due to chromosomal coordinates, those aberrant 
+    sequences have been padded with zeros values so as no to disturb matrix dimensionality
+    '''
+    #Setting up a gene profile
+    gene_profile=np.empty(shape=(1, 500))
+
+    #For every PWM matrix in the TF set
+    for pwm in TFs.values():
+
+        k=pwm.shape[1]
+        TF_profile=np.array([])
+        endpoint=len(gene)-25
+    
+        for start in range(endpoint):
+            TF_profile=np.append(TF_profile, score_interval(gene[start:start+k],pwm))
+
+        #This is important, as it accounts for sequences that differ in length and thus cannot result in 500 intervals
+        if TF_profile.shape[0]!=500:
+            pad_size= 500-TF_profile.shape[0]
+            TF_profile=np.pad(TF_profile, (pad_size,0), mode='constant')
+
+        gene_profile=np.vstack((gene_profile,TF_profile))
+
+    return gene_profile[1:,:] 
