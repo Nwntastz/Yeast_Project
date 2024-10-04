@@ -92,4 +92,5 @@ def gene_profile( gene: str, TFs: Dict[str,np.ndarray] ) -> np.ndarray:
 
         gene_profile=np.vstack((gene_profile,TF_profile))
 
-    return gene_profile[1:,:] 
+    return gene_profile[1:,:]
+

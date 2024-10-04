@@ -53,20 +53,28 @@ with open(os.getcwd()+"\\Data\\sequences1.fa","r") as f: #sequences1.fa contains
 ### Final result ###
 
 #Setting up an array to wrap the results
-total_profile=np.empty(len(motifs), dtype=object)
+total_profile=np.empty(len(sequences), dtype=object)
 
 #Set up a pool executor for concurrent execution
 with concurrent.futures.ProcessPoolExecutor() as executor:
     #Create all processes
-    control={executor.submit(gene_profile, pwm, sequences):index for index, pwm in enumerate(motifs.values())}
+    control={executor.submit(gene_profile, gene,motifs):index for index, gene in enumerate(sequences.values())}
 
-    #Save the processes as completed // Retain the original index/TF identity
+    #Save the processes as completed // Retain the original index/ gene identity
     counter=0
     for process in concurrent.futures.as_completed(list(control.keys())):
         counter+=1
         idx=control[process]
         total_profile[idx]=process.result()
-        print(f"Finished {counter/len(motifs)*100:.2f} % of PWMs")
+        print(f"Finished {counter/len(sequences)*100:.2f} % of genes", end='\r', flush=True)
 
-with open(r"C:\Users\nwnta\Documents\TF_binding.npy","rb") as f:
+total_profiles=np.stack([profile for profile in total_profile])
+
+
+
+#I/O for the generated file
+with open(rf"{os.getcwd()}"+"\\Gene_Profiles.npy", "wb") as f:
+    np.save(f,total_profiles)
+
+with open(rf"{os.getcwd()}"+"\\Gene_Profiles.npy","rb") as f: #Will work only if file is in same directory
     result=np.load(f, allow_pickle=True)
