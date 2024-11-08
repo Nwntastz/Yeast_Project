@@ -1,5 +1,8 @@
 import numpy as np
 from typing import Dict
+from tslearn.piecewise import SymbolicAggregateApproximation
+from tslearn.piecewise import OneD_SymbolicAggregateApproximation
+
 
 def score_interval(interval: str, pwm: np.ndarray)-> np.float64:
 
@@ -93,4 +96,55 @@ def gene_profile( gene: str, TFs: Dict[str,np.ndarray] ) -> np.ndarray:
         gene_profile=np.vstack((gene_profile,TF_profile))
 
     return gene_profile[1:,:]
+
+
+def _init_fit(data, type='sax'):
+
+    if type=="sax":
+            
+            n_sax_symbols = 8
+            n_segments=30
+
+            sax = SymbolicAggregateApproximation(n_segments=n_segments,
+                                            alphabet_size_avg=n_sax_symbols)
+        
+            return sax.fit(data)
+
+    elif type=='one_d_sax':
+
+        n_seg=30
+
+        one_d_sax = OneD_SymbolicAggregateApproximation(
+        n_segments=n_seg,
+        alphabet_size_avg=10,
+        alphabet_size_slope=10,
+        sigma_l=np.sqrt(0.03/(500/n_seg))
+        )
+        
+        
+        return one_d_sax.fit(data)
+    
+
+
+def process_batch(f,batch, type='sax') -> tuple:
+
+    if type=='sax':
+    
+        sax=_init_fit(f)
+        results=[]
+
+        for row, column, repr in batch:
+            results+=[( row, column, sax.distance_sax(repr[row,:,np.newaxis], repr[column,:,np.newaxis]) ) ]
+    
+        return results
+    
+    elif type=='one_d_sax':
+        one_d_sax=_init_fit(f, type='one_d_sax')
+
+        results=[]
+
+        for row, column, repr in batch:
+            results+=[( row, column, one_d_sax.distance_1d_sax(repr[row,:], repr[column,:]) ) ]
+            
+        return results
 

@@ -1,0 +1,243 @@
+import numpy as np
+import os 
+import concurrent.futures
+from multiprocessing import shared_memory
+import itertools
+from Scripts.pwm_functions import process_batch
+from tck import TCK
+
+
+#A small utility in order to more cleanly define the directory of a file 
+def generate_path(folder: str, file: str)->str:
+
+    '''
+    This function accepts as input a system folder and a file name thought to exist within said folder.
+    The function returns a full path to the desired file. If the path is not valid, it returns an error.
+    '''
+
+    curdir=os.getcwd()
+    full_dir=os.path.join(os.path.dirname(curdir), folder, file)
+    return full_dir if os.path.exists(full_dir) else f"File {file} does not exist in Folder {folder}"
+
+#Import the generated gene IDs
+with open(rf'{generate_path("Documents","Gene_Profiles.npy")}',"rb") as f: 
+    result=np.load(f, allow_pickle=True)
+
+
+model=TCK.TCK(G=120, C=30)
+
+rs=result.reshape(-1,result.shape[2], result.shape[1])
+r=rs[:rs.shape[0]//2,:,:]
+
+model.fit(r, minVc=30, maxV=80)
+### Reducing gene ID dimensions ### 
+
+### The 1D-SAX representation ###
+from tslearn.piecewise import OneD_SymbolicAggregateApproximation
+from tslearn.piecewise import SymbolicAggregateApproximation
+
+
+#Z-score normalization of my matrix
+mu=np.mean(result,axis=-1, keepdims=True)
+std=np.std(result, axis=-1, keepdims=True)
+normalized=(result-mu)/std
+
+n_sax_symbols = 8
+n_segments=30
+sax = SymbolicAggregateApproximation(n_segments=n_segments,
+                                     alphabet_size_avg=n_sax_symbols,)
+
+
+n_seg=30
+one_d_sax = OneD_SymbolicAggregateApproximation(
+    n_segments=n_seg,
+    alphabet_size_avg=10,
+    alphabet_size_slope=10,
+    sigma_l=np.sqrt(0.03/(500/n_seg)))
+
+
+one_d_repr=[]
+for index in range(normalized.shape[0]):
+    one_d_repr.append(one_d_sax.fit_transform(normalized[index,:,:,np.newaxis]))
+
+one_d_repr=np.array(one_d_repr)
+one_d_repr=np.squeeze(one_d_repr)
+
+
+
+#This finds the SAX representations for all time series in my dataset
+repr=[]
+for index in range(normalized.shape[0]):
+    repr.append(sax.fit_transform(normalized[index,:,:,np.newaxis]))
+
+#This just converts the final array to the appropriate format 
+repr=np.array(repr)
+repr=np.squeeze(repr)
+
+
+#### Distance Profile calculation function ####
+
+def get_distance_matrix(TF: int, random_entries: np.array, repr: np.ndarray = repr, subset: int = 30, type: str = 'sax' ) -> np.ndarray:
+
+    shm = shared_memory.SharedMemory(create=True, size=repr.nbytes)
+    
+    # Create a Numpy array using the shared memory
+    shared_repr = np.ndarray(repr.shape, dtype=repr.dtype, buffer=shm.buf)
+    np.copyto(shared_repr, repr)  # Copy data into shared memory
+
+    #distances=np.zeros((repr.shape[0], repr.shape[0]))
+    distances=np.zeros((subset,subset))
+    batch_size=10
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=2) as executor:
+
+        futures = []
+
+        if type=='sax':
+    
+            for row in range(subset): #repr.shape[0]
+
+                batch = []
+
+                for column in range(row, subset): #repr.shape[0]
+                    
+                    batch.append((random_entries[row], random_entries[column], shared_repr[:,TF,:]))
+
+                    if len(batch) == batch_size:
+                        futures.append(executor.submit(process_batch, normalized[0,:,:,np.newaxis], batch))
+                        batch = []
+
+                if batch:  # Submit any remaining pairs
+                    futures.append(executor.submit(process_batch, normalized[0,:,:,np.newaxis], batch))
+                
+                for process in concurrent.futures.as_completed(futures):
+                    
+                    results=process.result()
+
+                    for row, column, value in results:
+                        distances[np.where(random_entries==row)[0][0], np.where(random_entries==column)[0][0]]=value
+
+        elif type=='one_d_sax':  
+
+            for row in range(subset): #repr.shape[0]
+
+                batch = []
+
+                for column in range(row, subset): #repr.shape[0]
+                    
+                    batch.append((random_entries[row], random_entries[column], shared_repr[:,TF,:]))
+
+                    if len(batch) == batch_size:
+                        futures.append(executor.submit(process_batch, normalized[0,:,:,np.newaxis], batch, 'one_d_sax'))
+                        batch = []
+
+                if batch:  # Submit any remaining pairs
+                    futures.append(executor.submit(process_batch, normalized[0,:,:,np.newaxis], batch, 'one_d_sax'))
+                
+                for process in concurrent.futures.as_completed(futures):
+                    
+                    results=process.result()
+
+                    for row, column, value in results:
+                        distances[np.where(random_entries==row)[0][0], np.where(random_entries==column)[0][0]]=value
+                               
+    shm.close()  # Close the shared memory
+    shm.unlink()  # Remove the shared memory block
+   
+    return distances
+
+
+#### Implementing Distance calculation #####
+#random_inds=np.random.choice(np.arange(one_d_repr.shape[0]), replace=False, size=100)
+
+with open(r"C:\Users\nwnta\Documents\Gene_Coexp\Total_matrix.npy",'rb') as f:
+    coexp=np.load(f, allow_pickle=True)
+
+random_inds=np.concatenate( (np.argsort(coexp[6321,:])[-30:], np.random.choice(np.arange(one_d_repr.shape[0]), replace=False, size=20)) )
+
+random_inds=np.concatenate( (np.argsort(coexp[6321,:])[-30:],  np.argsort(coexp[6321,:])[:50]) )
+
+
+dist=[]
+counter=0
+for TF in range(145):
+    dist.append( get_distance_matrix(TF,repr=one_d_repr,random_entries=random_inds,subset=80, type='one_d_sax') )
+    counter+=1
+    print(f"Finished {(counter/145)*100:.2f} % of TFs", end='\r', flush=True)
+
+distances=np.array(dist)
+
+
+
+#This effectively summarizes each vector of matrix wise distances into a matrix to matrix distance table
+dis_mat=np.mean(distances,axis=0)
+
+
+dis_mat=np.linalg.norm(distances, ord=2, axis=0)
+
+
+#Making my matrix symmetric
+sym_di=dis_mat + dis_mat.T - np.diag(dis_mat.diagonal())
+
+
+#### Plotting ####
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+sns.clustermap(data=sym_di, method='average', cmap='viridis', xticklabels= True, yticklabels=True)
+plt.xticks(fontsize=3)
+plt.savefig("trial_cluster_10")
+plt.close()
+
+
+
+
+### This is just a PCA visualization trial // Could be deleted ### 
+from sklearn.decomposition import PCA
+from matplotlib.lines import Line2D
+
+mu=np.mean(sym_di,axis=-1, keepdims=True)
+std=np.std(sym_di, axis=-1, keepdims=True)
+norm_ds=(sym_di-mu)/std
+
+
+pca = PCA(n_components=2)
+tr=pca.fit_transform(norm_ds)
+
+#Loading projection of my data
+loads=pca.components_.T * np.sqrt(pca.explained_variance_)
+t=norm_ds @ loads
+
+labs=np.array([1]*30 + [0]*50)
+
+plt.scatter(x=t[np.where(labs==1)[0],0], y=t[np.where(labs==1)[0],1], edgecolors='k', label="Over",cmap='viridis')
+plt.scatter(x=t[np.where(labs==0)[0],0], y=t[np.where(labs==0)[0],1], edgecolors='k', label="Under", cmap='viridis')
+sns.despine()
+plt.legend()
+plt.xlabel(f"PC1 ({pca.explained_variance_ratio_[0]*100:.2f}%)")
+plt.ylabel(f"PC2 ({pca.explained_variance_ratio_[1]*100:.2f}%)")
+plt.savefig("test")
+plt.close()
+
+
+#This is just to stack the summaries of the genes in an array of dimensions N_genes X N_TFs
+gene_summaries=np.empty((result.shape[1]))
+for id in range(result.shape[0]):
+    gene_summaries=np.vstack((gene_summaries, cutoff_summary(result[id,:,:], cutoff=0.7)))
+
+
+### Plotting some TF gene profiles to see how they look ###
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+fig, ax = plt.subplots()
+sns.lineplot(data=normalized[1,1,:])
+#ax.set_xlim([means.min()-0.03, means.max()+0.03])
+sns.lineplot(data=one_d_sax_dataset_inv[1,:].reshape(-1,), color="k")
+fig.savefig("prof1.png")
+
+### This needs further assessment ### //Clustering
+from sklearn.cluster import AgglomerativeClustering
+clustering=AgglomerativeClustering().fit(gene_summaries)
+
+set(clustering.labels_)
