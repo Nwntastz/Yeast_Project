@@ -5,6 +5,9 @@ from multiprocessing import shared_memory
 import itertools
 from Scripts.pwm_functions import process_batch
 from tck import TCK
+from tck.datasets import DataLoader
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
 
 
 #A small utility in order to more cleanly define the directory of a file 
@@ -15,23 +18,41 @@ def generate_path(folder: str, file: str)->str:
     The function returns a full path to the desired file. If the path is not valid, it returns an error.
     '''
 
-    curdir=os.getcwd()
-    full_dir=os.path.join(os.path.dirname(curdir), folder, file)
+    full_dir=os.path.join(os.path.expanduser("~"), folder, file)
     return full_dir if os.path.exists(full_dir) else f"File {file} does not exist in Folder {folder}"
 
 #Import the generated gene IDs
-with open(rf'{generate_path("Documents","Gene_Profiles.npy")}',"rb") as f: 
+with open(rf'{generate_path("Downloads","Gene_Profiles.npy")}',"rb") as f: 
     result=np.load(f, allow_pickle=True)
 
 
 model=TCK.TCK(G=120, C=30)
+a=result[random_inds,:,:]
+#noise = np.random.normal(0, 1e-2, a.shape)
+#a=a+noise
+b=np.moveaxis(a,1,2)
+K=model.fit(b, I=3)
 
-rs=result.reshape(-1,result.shape[2], result.shape[1])
-r=rs[:rs.shape[0]//2,:,:]
-
-model.fit(r, minVc=30, maxV=80)
 ### Reducing gene ID dimensions ### 
+res=model.predict('tr-tr')
+scaler=StandardScaler()
+re=scaler.fit_transform(res)
 
+fig =  plt.figure(figsize=(6,6))
+h = plt.imshow(re)
+plt.title("TCK matrix (sorted)")
+plt.colorbar(h)
+plt.xlabel("MTS class")
+plt.ylabel("MTS class")
+plt.show()
+
+from sklearn.decomposition import KernelPCA
+kpca = KernelPCA(n_components=2, kernel='precomputed')
+embeddings_pca = kpca.fit_transform(res)
+fig =  plt.figure(figsize=(8,6))
+plt.scatter(embeddings_pca[:,0], embeddings_pca[:,1], c=[1]*30 + [0]*49, s=10, cmap='tab20')
+plt.title("Kernel PCA embeddings")
+plt.show()
 ### The 1D-SAX representation ###
 from tslearn.piecewise import OneD_SymbolicAggregateApproximation
 from tslearn.piecewise import SymbolicAggregateApproximation
@@ -150,13 +171,13 @@ def get_distance_matrix(TF: int, random_entries: np.array, repr: np.ndarray = re
 #### Implementing Distance calculation #####
 #random_inds=np.random.choice(np.arange(one_d_repr.shape[0]), replace=False, size=100)
 
-with open(r"C:\Users\nwnta\Documents\Gene_Coexp\Total_matrix.npy",'rb') as f:
+with open(r"C:\Users\nwntas\Downloads\Total_matrix.npy",'rb') as f:
     coexp=np.load(f, allow_pickle=True)
 
-random_inds=np.concatenate( (np.argsort(coexp[6321,:])[-30:], np.random.choice(np.arange(one_d_repr.shape[0]), replace=False, size=20)) )
+
+random_inds=np.concatenate( (np.argsort(coexp[6321,:])[-30:], np.random.choice(np.arange(result.shape[0]), replace=False, size=20)) )
 
 random_inds=np.concatenate( (np.argsort(coexp[6321,:])[-30:],  np.argsort(coexp[6321,:])[:50]) )
-
 
 dist=[]
 counter=0
