@@ -7,7 +7,7 @@ import os
 ### TF PWM dictionary set-up ###
 
 motifs=dict()
-with open(os.getcwd()+"\\Data\\target_motifs.txt","r") as f:
+with open(os.getcwd()+"/Data/target_motifs.txt","r") as f:
 
     for line in f:
         
@@ -35,7 +35,7 @@ with open(os.getcwd()+"\\Data\\target_motifs.txt","r") as f:
 ### Setting up a dictionary containing the selected upstream intervals for each gene ###
 
 sequences=dict()
-with open(os.getcwd()+"\\Data\\sequences1.fa","r") as f: #sequences1.fa contains sequences of length 500 + max{len(PWM)}
+with open(os.getcwd()+"/Data/sequences1.fa","r") as f: #sequences1.fa contains sequences of length 500 + max{len(PWM)}
     
     for line in f:
 
@@ -70,11 +70,3 @@ with concurrent.futures.ProcessPoolExecutor() as executor:
 
 total_profiles=np.stack([profile for profile in total_profile])
 
-
-
-#I/O for the generated file
-with open(rf"{os.getcwd()}"+"\\Gene_Profiles.npy", "wb") as f:
-    np.save(f,total_profiles)
-
-with open(rf"{os.getcwd()}"+"\\Gene_Profiles.npy","rb") as f: #Will work only if file is in same directory
-    result=np.load(f, allow_pickle=True)

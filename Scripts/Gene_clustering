@@ -3,11 +3,140 @@ import os
 import concurrent.futures
 from multiprocessing import shared_memory
 import itertools
-from Scripts.pwm_functions import process_batch
-from tck import TCK
-from tck.datasets import DataLoader
-import matplotlib.pyplot as plt
+#from Scripts.pwm_functions import process_batch
+#from tck import TCK
+#from tck.datasets import DataLoader
+#import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
+import somoclu as som
+import pycatch22 as catch22
+from scipy.spatial.distance import pdist, squareform
+
+
+with open(r'/mnt/c/Users/nwntas/Downloads/dists.npy',"rb") as f: 
+    result=np.load(f,allow_pickle=True)
+
+data=np.array([ [catch22.catch22_all(result[ind,row,:])["values"] for row in range(result.shape[1])] for ind in range(result.shape[0])], dtype=np.float32)
+
+def generate_corr(profile: np.ndarray) -> np.ndarray:
+    
+    s=som.Somoclu(n_columns=10, n_rows=10)
+    s.train(profile)
+    sm=s.codebook
+
+    n_features=profile.shape[1]
+    corr_mat=np.zeros( shape=(n_features,n_features) )
+
+    for row in range(n_features):
+
+        feat1=sm[:,:,row].flatten()
+        feat1 = ( feat1-np.mean(feat1) ) / np.std(feat1)
+
+        for column in range(row, n_features):
+            
+            feat2 = sm[:,:,column].flatten()
+            feat2 = ( feat2-np.mean(feat2) ) / np.std(feat2)
+            
+            corr_mat[row, column]=np.corrcoef(feat1, feat2)[0,1]
+    
+    return corr_mat
+
+dists=np.array([generate_corr(data[gene]) for gene in range(data.shape[0])])
+
+
+
+arr_reshaped = dists.reshape(dists.shape[0], -1)
+frobenius_norm_vector = pdist(arr_reshaped, metric='euclidean')
+frobenius_norm_matrix = squareform(frobenius_norm_vector)
+
+mu,std=np.mean(frobenius_norm_matrix.flatten()), np.std(frobenius_norm_matrix.flatten())
+
+nr=(frobenius_norm_matrix-mu)/std
+
+
+
+
+### Validation of SOM clusters ###
+
+from scipy.cluster.hierarchy import linkage, fcluster
+from sklearn.metrics import silhouette_score
+
+X_train, y_train=[],[]
+links=linkage(frobenius_norm_vector, method='ward')
+
+for num in np.linspace(1,3, 3):
+    X_train+=[num]
+    labels=fcluster(links, t=num, criterion='distance') #I will use a range of t in [4,12]
+    y_train+=[silhouette_score(frobenius_norm_matrix, labels=labels, metric='precomputed')]
+
+X_train, Y_train=np.array(X_train).reshape(-1,1), np.array(y_train).reshape(-1,1)
+
+from sklearn.gaussian_process import GaussianProcessRegressor as GP
+from sklearn.gaussian_process.kernels import RBF
+
+def UCB(mean: np.array, std: np.array, coef: float)-> np.array:
+    return mean + coef * std
+
+def calculate_state(model,test_data, ucb_coef=8):
+    y_mean,y_std=model.predict(X=test_data,return_std=True)
+    return UCB(y_mean,y_std,ucb_coef)
+
+
+
+def training(train_data:np.array, known_values: np.array, x_test:np.array, cycles: int = 2)-> tuple:
+    #Defining the RBF kernel 
+    kernel=RBF(length_scale=1)
+    #Initialization of the Gaussian Process Regressor 
+    gp=GP(kernel=kernel)
+
+    #Fitting the known data
+    gp.fit(X=train_data,y=known_values)
+    ucb=calculate_state(gp,x_test,ucb_coef=8)
+    
+    #Finding the maximum point to be considered based on the UCB criterion
+    next_point=x_test[np.argmax(ucb)]
+
+    if cycles!=0:
+
+        decay=lambda x: 0.5 * np.exp(-2 * x)
+
+        for cycle in range(cycles):
+            
+            print(f"Cycle: {cycle}, {next_point}")
+    
+            
+            #Update the training data
+            train_data=np.append(train_data, next_point.reshape(1,-1),axis=0)
+
+            labels=fcluster(links, t=next_point, criterion='distance')
+            new_val=[[silhouette_score(frobenius_norm_matrix, labels=labels, metric='precomputed')*100_000]]
+            known_values=np.concatenate((known_values,new_val))
+
+            #if known_values.max()>new_val:
+                #break
+
+            #Fit the new GP
+            gp.fit(X=train_data,y=known_values.reshape(-1,1))
+
+            #Set a new test set 
+            dT=decay(cycle)
+            x_test=np.linspace(next_point-dT, next_point+dT, 1000).reshape(-1,1)
+
+            #Calculate the conditional parameters for my all points that belong to my test space
+            ucb=calculate_state(gp,x_test,ucb_coef=8)
+
+            next_point=x_test[np.argmax(ucb)]
+        
+        return known_values.max()
+    else:
+        return "A cycle number is required"
+    
+
+
+
+training(X_train, Y_train*100_000, np.linspace(1,3, 3).reshape(-1,1), cycles=10)
+
+
 
 
 #A small utility in order to more cleanly define the directory of a file 
@@ -25,13 +154,16 @@ def generate_path(folder: str, file: str)->str:
 with open(rf'{generate_path("Downloads","Gene_Profiles.npy")}',"rb") as f: 
     result=np.load(f, allow_pickle=True)
 
+with open(r'/mnt/c/Users/nwntas/Downloads/SOMs.npy',"rb") as f: 
+    dists=np.load(f, allow_pickle=True)
 
-model=TCK.TCK(G=120, C=30)
+
+model=TCK.TCK(G=200, C=40)
 a=result[random_inds,:,:]
 #noise = np.random.normal(0, 1e-2, a.shape)
 #a=a+noise
 b=np.moveaxis(a,1,2)
-K=model.fit(b, I=3)
+K=model.fit(b, I=2)
 
 ### Reducing gene ID dimensions ### 
 res=model.predict('tr-tr')
@@ -53,6 +185,7 @@ fig =  plt.figure(figsize=(8,6))
 plt.scatter(embeddings_pca[:,0], embeddings_pca[:,1], c=[1]*30 + [0]*49, s=10, cmap='tab20')
 plt.title("Kernel PCA embeddings")
 plt.show()
+
 ### The 1D-SAX representation ###
 from tslearn.piecewise import OneD_SymbolicAggregateApproximation
 from tslearn.piecewise import SymbolicAggregateApproximation
@@ -174,6 +307,8 @@ def get_distance_matrix(TF: int, random_entries: np.array, repr: np.ndarray = re
 with open(r"C:\Users\nwntas\Downloads\Total_matrix.npy",'rb') as f:
     coexp=np.load(f, allow_pickle=True)
 
+with open(r"/mnt/c/Users/nwntas/Downloads/Total_matrix.npy",'rb') as f:
+    coexp=np.load(f, allow_pickle=True)
 
 random_inds=np.concatenate( (np.argsort(coexp[6321,:])[-30:], np.random.choice(np.arange(result.shape[0]), replace=False, size=20)) )
 
@@ -203,14 +338,15 @@ sym_di=dis_mat + dis_mat.T - np.diag(dis_mat.diagonal())
 
 #### Plotting ####
 import matplotlib.pyplot as plt
+import matplotlib
 import seaborn as sns
 
-sns.clustermap(data=sym_di, method='average', cmap='viridis', xticklabels= True, yticklabels=True)
-plt.xticks(fontsize=3)
+matplotlib.use('Agg')
+
+sns.clustermap(data=frobenius_norm_matrix, method='average', cmap='viridis_r')
+#plt.xticks(fontsize=3)
 plt.savefig("trial_cluster_10")
 plt.close()
-
-
 
 
 ### This is just a PCA visualization trial // Could be deleted ### 
@@ -262,3 +398,5 @@ from sklearn.cluster import AgglomerativeClustering
 clustering=AgglomerativeClustering().fit(gene_summaries)
 
 set(clustering.labels_)
+
+
