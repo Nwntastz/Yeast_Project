@@ -20,9 +20,288 @@ from scipy.cluster.hierarchy import linkage, fcluster
 from sklearn.metrics import silhouette_score
 from sklearn.metrics import adjusted_rand_score
 
+matplotlib.use('Agg')
+
+#Fourth attempt / Using De Bruijn graphs and phylogenetic inference
+
+### You should remember that this procedure starts with finding the SAX representation of all binding profiles
+
+#Converting the SAX representations to a string
+
+def SAX_to_String(profile: np.ndarray, word_length: int = 30) -> str:
+
+    '''
+    This function accepts a SAX represented TF binding profile. The function converts each site (total number of sites: word_length) to
+    a string of length profile.shape[0], in our case equal to the number of TF factors i.e. 145. It outputs a string of length 145 * word_length,
+    corresponding to the concatenation of strings per site. 
+    '''
+
+    s=''
+    for index in range(word_length):
+        #This is the computation of a string per position of profile for all TFs
+        s+=(profile[:,index]+65).astype(np.int8).tobytes().decode('ascii') #65 here for ASCII capital letters.
+    return s
+
+#These are the per site string representations of the TF binding profiles for all S. cerevisae genes
+SAX_strings={f'Gene {profile}': SAX_to_String(profile=repr[profile]) for profile in range(repr.shape[0])}
+
+
+#I could try to use some form of jaccard index // OR even cosine similarity(?)
+
+def compute_Jaccard(sequence1: str, sequence2: str, k: int)-> float:
+    '''
+    The function accepts two sequences, sequence1 and sequence2, representing the cumulative binding profile of TFs in the upstream area of a certain gene as input. 
+    The function outputs the jaccard index score based on the similarity of the two strings based on the common set of k-mers of that length.
+    '''
+
+    #Find all k-mer instances within the two sequences
+    kmers1=[sequence1[index: index+k] for index in range(len(sequence1)-k+1)]
+    kmers2=[sequence2[index: index+k] for index in range(len(sequence2)-k+1)]
+
+    kmers1, kmers2 = set(kmers1), set(kmers2)
+
+    return len(kmers1 & kmers2) / (len(kmers1) + len(kmers2) - len(kmers1 & kmers2) )
+
+
+distance_Jaccard=np.zeros((repr.shape[0], repr.shape[0]))
+
+#Generating a distance matrix based on the Jaccard distances
+for i in range(repr.shape[0]):
+    for j in range(i, repr.shape[0]):
+        distance_Jaccard[i,j] = compute_Jaccard(sequence1=SAX_strings[f'Gene {i}'], sequence2=SAX_strings[f'Gene {j}'], k=6)
+
+distance_Jaccard=np.load("Jaccard.npy")
+
+sym_jaccard=distance_Jaccard + distance_Jaccard.T - np.diag(distance_Jaccard.diagonal())
+
+
+#Try to align the sequences using multiple sequence alignment because, why not! First, i need to create a FASTA file
+
+with open(os.getcwd()+'\\scripts\\SAX_strings.fa','x') as f:
+    for gene, string in SAX_strings.items():
+        f.write(f'>{gene}\n{string}\n')
+
+
+
+#This is stuff related to de-bruijn graph interpretation
+
+import math
+from functools import reduce
+from scipy.special import gammaln
+import networkx as nx
+
+def debruijn_adjacency(representation: str, order: int = 5) -> np.ndarray:
+
+    '''
+    This function accepts as input a SAX cumulative representation of TF binding.
+    The function outputs an adjacency matrix corresponding to the De-Bruijn graph of the cyclic representation of the word.
+
+    Adapted from: De Bruijn entropy and string similarity
+    '''
+
+    #We first find the kth-order patterns that exist within the input representation
+    kmers=[]
+    for index in range(len(representation)-order+1):
+        kmers+=[ representation[index: index+order] ]
+
+    #This is to make the word cyclic and make sure that we build a cyclic eulerian graph
+    for i in range(order): 
+        kmers+=[kmers[-1][1:]+kmers[0][i]]
+
+    #Since the kmers are added sequentialy, taking the neighboring entries results in constructing the De-Bruijn graph.
+    edges = [(kmers[i], kmers[i+1]) for i in range(len(kmers)) if i+1 < len(kmers)]
+
+    #A utility that numbers unique patterns to indices to help with adjacency matrix construction
+    node_index={kmer: num for num, kmer in enumerate(np.unique(kmers).tolist())}
+
+    #Initialization of the adjacency matrix
+    adjacency = np.zeros( (len(node_index), len(node_index)) )
+
+    #Adding 1 for each ordered pair, i.e. each edge of the de-Bruijn graph
+    for outgoing, incoming in edges:
+        adjacency[node_index[outgoing], node_index[incoming]]+=1
+
+    return adjacency
+
+def calculate_entropy(A: np.ndarray) -> float:
+
+    #This is the greatest common divisor of the flattened input matrix
+    d=reduce(math.gcd, A.flatten().astype(int))
+
+    #Find the divisors of d
+    candidates = np.arange(1, int(np.sqrt(d)) + 1)
+    divisors = candidates[d % candidates == 0]
+
+    entropy = 0
+
+    for divisor in divisors:
+        
+        #Normalize based on divisor
+        Acur= A/divisor
+        degrees=np.sum(Acur, axis=1)
+
+        #This is the Laplacian of matrix Acur
+        L=np.diag( degrees ) - Acur
+
+        #I only need to take the determinant once because all diagonal cofactors are equal
+        L_minor = np.delete(np.delete(L, 0, axis=0), 0, axis=1)  # Remove row i and column i
+        logt=np.linalg.slogdet(L_minor)  #this calculates the number of directed spanning trees 
+
+        #This just calculates all the numbers up to divisor that are prime (gcd: 1) with divisor
+        totient = np.sum([math.gcd(divisor, i) == 1 for i in range(1, divisor + 1)])
+
+        #This is the upper part of eqn. 2 from article
+        log_upper = np.log(totient) + logt+ np.sum( gammaln(degrees) )
+
+        #This is the lower part of eqn.2 from article
+        log_lower = np.log(divisor) + np.sum( gammaln(Acur[Acur>0] + 1 ) )
+
+        entropy += log_upper - log_lower
+        
+    return entropy
+
+def debruijn_coupled_adjacency(representation1: str, representation2: str, order: int = 5) -> np.ndarray:
+
+    '''
+    This function accepts as input a SAX cumulative representation of TF binding.
+    The function outputs an adjacency matrix corresponding to the De-Bruijn graph of the cyclic representation of the word.
+
+    Adapted from: De Bruijn entropy and string similarity
+    '''
+
+    #We first find the kth-order patterns that exist within the input representation
+    kmers1=[]
+    for index in range(len(representation1)-order+1):
+        kmers1+=[ representation1[index: index+order] ]
+
+    kmers2=[]
+    for index in range(len(representation2)-order+1):
+        kmers2+=[ representation2[index: index+order] ]
+
+    #This is to make the word cyclic and make sure that we build a cyclic eulerian graph
+    for i in range(order): 
+        kmers1+=[kmers1[-1][1:]+kmers1[0][i]]
+        kmers2+=[kmers2[-1][1:]+kmers2[0][i]]
+
+    common_kmers = set(kmers1) | set(kmers2)
+    #Since the kmers are added sequentialy, taking the neighboring entries results in constructing the De-Bruijn graph.
+    edges1 = [(kmers1[i], kmers1[i+1]) for i in range(len(kmers1)) if i+1 < len(kmers1)]
+    edges2 = [(kmers2[i], kmers2[i+1]) for i in range(len(kmers2)) if i+1 < len(kmers2)]
+
+    #A utility that numbers unique patterns to indices to help with adjacency matrix construction
+    node_index={kmer: num for num, kmer in enumerate(common_kmers)}
+
+    #Initialization of the adjacency matrix
+    adjacency1 = np.zeros( (len(node_index), len(node_index)) )
+    adjacency2 = np.zeros( (len(node_index), len(node_index)) )
+
+    #Adding 1 for each ordered pair, i.e. each edge of the de-Bruijn graph
+    for outgoing, incoming in edges1:
+        adjacency1[node_index[outgoing], node_index[incoming]]+=1
+    
+    for outgoing, incoming in edges2:
+        adjacency2[node_index[outgoing], node_index[incoming]]+=1
+
+    return adjacency1,adjacency2
+
+def calculate_relative_entropy(A1: np.ndarray, A2: np.ndarray) -> float:
+
+    '''
+    This function accepts the eulerian quivers of two strings and produces the relative entropy between the two.
+    The function calculates the component-wise eulerian entropy for combined string. Could also be used to find the common
+    patterns between the two strings.
+    '''
+
+    #Transformation of input adjacencies
+    Af = A1 - A2 
+    Af[Af<0]=0 #Clipping the values to non-negative 
+    Ab = A2 - A1
+    Ab[Ab<0]=0
+
+    A = Af + Ab.T
+
+    #This is to find all disconnected euleriean quivers from the combined adjacency
+    G = nx.from_numpy_array(A, create_using=nx.DiGraph)
+    
+    # A list containing the eulerian quivers
+    sccs = list(nx.strongly_connected_components(G))
+    sccs = sorted(sccs, key=lambda x: min(x))  # Sorted for consistency
+
+    entropy = 0
+
+    for quiver in sccs:
+        
+        #Finding the component-wise quiver 
+        Ac= A[list(quiver),:] 
+
+        #Degenerate case of a eulerian quiver with a single node
+        if Ac.shape[0] == 1:
+            #In that case, there is no entropy
+            entropy+=0
+            continue
+
+        #This is to clean any columns containing zero entries // Makes matrix square
+        Ac = Ac[:,np.any(Ac!=0, axis=0)]       
+
+        #This is the greatest common divisor of the flattened input matrix
+        d=reduce(math.gcd, Ac.flatten().astype(int))
+
+        #Find the divisors of d
+        candidates = np.arange(1, int(np.sqrt(d)) + 1)
+        divisors = candidates[d % candidates == 0]
+
+        for divisor in divisors:
+            
+            #Normalize based on divisor
+            Acur= Ac/divisor
+            degrees=np.sum(Acur, axis=1)
+
+            #This is the Laplacian of matrix Acur
+            L=np.diag( degrees ) - Acur
+
+            #I only need to take the determinant once because all diagonal cofactors are equal
+            L_minor = np.delete(np.delete(L, 0, axis=0), 0, axis=1)  # Remove row i and column i
+            _,logt=np.linalg.slogdet(L_minor)  #this calculates the number of directed spanning trees 
+
+            #This condition is important, since this means that there are no directed graphs with those nodes
+            #Thus we skip calculations
+            if np.isneginf(logt):
+                continue
+
+            #This just calculates all the numbers up to divisor that are prime (gcd: 1) with divisor
+            totient = np.sum([math.gcd(divisor, i) == 1 for i in range(1, divisor + 1)])
+
+            #This is the upper part of eqn. 2 from article
+            log_upper = np.log(totient) + logt + np.sum( gammaln(degrees) )
+
+            #This is the lower part of eqn.2 from article
+            log_lower = np.log(divisor) + np.sum( gammaln(Acur[Acur>0] + 1 ) )
+
+            entropy += log_upper - log_lower
+        
+    return entropy
+
+#Based on the paper the maximaly informative order of k=4 // log_{8}(4350)
+
+debruijn_entr=np.zeros( (100, 100) )
+for i in range(100):
+    for j in range(i,100):
+        A1, A2 = debruijn_coupled_adjacency(SAX_strings[f'Gene {i}'], SAX_strings[f'Gene {j}'], order=4)
+        debruijn_entr[i,j] = calculate_relative_entropy(A1=A1, A2=A2)
+
+
+A1, A2 = debruijn_coupled_adjacency(SAX_strings[f'Gene 22'], SAX_strings[f'Gene 24'], order=4)
+calculate_relative_entropy(A1=A1, A2=A2)
+
+
+deb = debruijn_entr + debruijn_entr.T
+ 
+visualize_clustermap(deb, 'average', 'deby')
+
+
 
 #A small utility in order to more cleanly define the directory of a file 
-def generate_path(folder: str, file: str)->str:
+def generate_path(folder: str, file: str)-> str:
 
     '''
     This function accepts as input a system folder and a file name thought to exist within said folder.
@@ -33,7 +312,7 @@ def generate_path(folder: str, file: str)->str:
     return full_dir if os.path.exists(full_dir) else f"File {file} does not exist in Folder {folder}"
 
 #Import the generated gene IDs
-with open(rf'{generate_path("Downloads","Gene_Profiles.npy")}',"rb") as f: 
+with open(rf'{generate_path("Documents","Gene_Profiles.npy")}',"rb") as f: 
     result=np.load(f, allow_pickle=True)
 
 
@@ -56,7 +335,7 @@ one_d_sax = OneD_SymbolicAggregateApproximation(
     n_segments=n_seg,
     alphabet_size_avg=10,
     alphabet_size_slope=10,
-    sigma_l=np.sqrt(0.03/(500/n_seg)))
+    sigma_l=np.sqrt(0.03/(500/n_seg))) #This was based on annotation from the paper of 1D-SAX
 
 
 ## Transformation of the original gene profiles to their corresponding representations ##
@@ -451,6 +730,24 @@ sns.clustermap(data=frobenius_norm_matrix, method='average', cmap='viridis_r')
 #plt.xticks(fontsize=3)
 plt.savefig("trial_cluster_10")
 plt.close()
+
+
+def visualize_clustermap(distance_matrix: np.ndarray, link: str, output_name: str):
+
+    '''
+    This function is responsible for visualizing the clustered distance matrix for a pre-defined distance metric.
+    The function accepts a symmetric matrix as input. It performs hierarchical clustering using a defined linkage parameter.
+    It returns a figure in the currect directory.
+    '''
+    #Defining the hierarchical clustering
+    D=squareform(distance_matrix)
+    linkage_matrix = linkage(D, method=link)
+    
+    #Plotting the clustering
+    sns.clustermap(distance_matrix, row_linkage=linkage_matrix, col_linkage=linkage_matrix, cmap="viridis_r")
+
+    plt.savefig(f"{output_name}.png")
+    plt.close()
 
 
 ### This is just a PCA visualization trial // Could be deleted ### 
